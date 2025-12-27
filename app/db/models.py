@@ -1,65 +1,41 @@
-"""
-Версия файла: 1.0.0
-Описание: ORM-модели БД для mp_seller_bot
-Дата изменения: 2025-12-27
-"""
+# Версия файла: 1.1.0
+# Описание: Модели БД (пользователи и аккаунты маркетплейсов с шифрованием API-ключей)
+# Дата изменения: 2025-12-27
 
 from __future__ import annotations
 
-import datetime as dt
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from datetime import datetime
 
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column
 
-class Base(DeclarativeBase):
-    pass
+from db import Base
 
 
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
-    tg_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=False), default=lambda: dt.datetime.utcnow())
-
-    credentials: Mapped[list["MarketplaceCredential"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tg_user_id: Mapped[int] = mapped_column(Integer, unique=True, index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
-class MarketplaceCredential(Base):
-    __tablename__ = "marketplace_credentials"
+class MarketplaceAccount(Base):
+    """
+    Хранит подключение пользователя к WB/Ozon.
+    Важно: api_key хранится зашифрованным (api_key_encrypted).
+    """
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-
-    marketplace: Mapped[str] = mapped_column(String(32), nullable=False)  # wb | ozon
-    encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)  # WB key may be ~500+ chars
-
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=False), default=lambda: dt.datetime.utcnow())
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=False), default=lambda: dt.datetime.utcnow())
-
-    user: Mapped["User"] = relationship(back_populates="credentials")
-
+    __tablename__ = "marketplace_accounts"
     __table_args__ = (
-        Index("ix_credentials_user_marketplace", "user_id", "marketplace", unique=True),
+        UniqueConstraint("tg_user_id", "marketplace", name="uq_tg_user_marketplace"),
     )
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tg_user_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
 
-class OrderEvent(Base):
-    __tablename__ = "order_events"
+    marketplace: Mapped[str] = mapped_column(String(16), nullable=False)  # "wb" | "ozon"
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-
-    marketplace: Mapped[str] = mapped_column(String(32), nullable=False)  # wb | ozon
-    scheme: Mapped[str] = mapped_column(String(16), nullable=False)       # fbs | fbo
-
-    external_id: Mapped[str] = mapped_column(String(128), nullable=False) # posting_id/order_id
-    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
-
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=False), default=lambda: dt.datetime.utcnow())
-
-    __table_args__ = (
-        Index("ix_order_events_dedup", "user_id", "marketplace", "scheme", "external_id", unique=True),
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
