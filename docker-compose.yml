@@ -46,7 +46,7 @@ services:
       - mp_seller_bot_net
     restart: unless-stopped
     expose:
-      - "8000"   # webhook server внутри сети (nginx будет ходить сюда)
+      - "8000"
 
   nginx:
     image: nginx:1.27-alpine
@@ -57,12 +57,9 @@ services:
       - mp_seller_bot_net
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "8081:80"
     volumes:
       - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
-      - ./deploy/nginx/certs:/etc/nginx/certs:ro
       - ./deploy/nginx/log:/var/log/nginx
 
 networks:
