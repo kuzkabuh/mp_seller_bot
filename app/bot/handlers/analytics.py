@@ -1,6 +1,11 @@
 """
-Версия файла: 1.0.0
-Описание: Команды аналитики для mp_seller_bot
+Версия файла: 2.0.0
+Описание: Команды аналитики для mp_seller_bot.
+
+Модуль реализует обработчики запросов к аналитике: подсчёт
+числа событий заказов за последние N дней и выдача простых
+подсказок по увеличению выручки. Обновлён для использования
+новой фабрики сессий (SessionLocal) и Repository.
 Дата изменения: 2025-12-27
 """
 
@@ -10,16 +15,24 @@ from aiogram import Router, F
 from aiogram.types import Message
 
 from bot.keyboards.menu import main_menu
-from db.engine import AsyncSessionLocal
+from db import SessionLocal
 from db.repo import Repo
 from services.analytics_service import AnalyticsService
+
 
 router = Router()
 
 
 @router.message(F.text == "Аналитика за 7 дней")
 async def analytics_7d(message: Message) -> None:
-    async with AsyncSessionLocal() as session:
+    """
+    Выводит количество событий заказов за последние 7 дней.
+
+    Счёт ведётся по таблице ``order_events`` и группируется по
+    маркетплейсу и схеме (fbs/fbo). Если событий нет, пользователю
+    выводится соответствующее сообщение.
+    """
+    async with SessionLocal() as session:
         repo = Repo(session)
         user = await repo.get_or_create_user(
             tg_user_id=message.from_user.id,
@@ -41,7 +54,14 @@ async def analytics_7d(message: Message) -> None:
 
 @router.message(F.text == "Подсказки по выручке")
 async def revenue_tips(message: Message) -> None:
-    async with AsyncSessionLocal() as session:
+    """
+    Выдаёт простые подсказки по увеличению выручки.
+
+    В текущей версии подсказки зашиты статически и служат
+    демонстрацией. В будущем этот сервис может анализировать
+    статистику пользователя и выдавать персональные советы.
+    """
+    async with SessionLocal() as session:
         service = AnalyticsService(session)
         tips = await service.revenue_tips_stub()
 

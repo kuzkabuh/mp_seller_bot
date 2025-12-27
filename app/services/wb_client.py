@@ -1,41 +1,62 @@
-"""
-Версия файла: 1.0.0
-Описание: Клиент Wildberries API (скелет) для mp_seller_bot
-Дата изменения: 2025-12-27
-"""
+# Версия файла: 2.0.0
+# Описание: Клиент Wildberries API для получения новых заказов.
+# Реализует вызовы FBS (сборочные заказы) и заглушку для FBO.
+# Дата изменения: 2025-12-27
 
 from __future__ import annotations
 
 import httpx
+from typing import Any, Dict, List
 
 
 class WBClient:
-    def __init__(self, api_key: str):
+    """
+    Асинхронный клиент для работы с API Wildberries.
+
+    Для получения новых сборочных заказов FBS используется
+    эндпоинт ``/api/v3/orders/new``. Для авторизации используется
+    переданный API‑ключ (обычно base64 токен). Согласно
+    документации WB API токен передаётся в заголовке
+    ``Authorization``. Заголовок ``Content-Type`` устанавливается
+    в ``application/json``.
+    """
+
+    def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": self.api_key,
             "Content-Type": "application/json",
         }
 
-    async def get_new_orders_fbs(self) -> list[dict]:
+    async def get_new_orders_fbs(self) -> List[Dict[str, Any]]:
         """
-        Заглушка: здесь будет реальный запрос WB FBS.
-        Возвращает список заказов/сборочных заданий в виде dict.
-        """
-        # TODO: реализовать эндпоинт WB FBS
-        return []
+        Возвращает список новых FBS заказов.
 
-    async def get_new_orders_fbo(self) -> list[dict]:
+        Запрос выполняется к ``https://marketplace-api.wildberries.ru/api/v3/orders/new``.
+        Если метод возвращает ключ ``orders``, возвращается его
+        содержимое. В противном случае возвращается пустой список.
+        При ошибках запроса генерируется исключение httpx.HTTPError.
         """
-        Заглушка: здесь будет реальный запрос WB FBO.
-        """
-        # TODO: реализовать эндпоинт WB FBO
-        return []
-
-    async def _get(self, url: str, params: dict | None = None) -> dict:
+        url = "https://marketplace-api.wildberries.ru/api/v3/orders/new"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(url, headers=self._headers(), params=params)
-            r.raise_for_status()
-            return r.json()
+            response = await client.get(url, headers=self._headers())
+            response.raise_for_status()
+            data = response.json()
+        # Ожидаем, что успешный ответ содержит ключ orders
+        orders = data.get("orders")
+        if isinstance(orders, list):
+            return orders
+        return []
+
+    async def get_new_orders_fbo(self) -> List[Dict[str, Any]]:
+        """
+        Заглушка для FBO заказов Wildberries.
+
+        На текущий момент API Wildberries предоставляет FBS заказы
+        через эндпоинт ``/api/v3/orders/new``. Когда официальный
+        эндпоинт для FBO будет доступен, здесь будет реализован
+        соответствующий запрос. Сейчас возвращается пустой список.
+        """
+        return []

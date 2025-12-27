@@ -1,6 +1,10 @@
 """
-Версия файла: 1.0.1
-Описание: Подключение/отключение ключей WB/Ozon для mp_seller_bot
+Версия файла: 2.0.0
+Описание: Обработчики подключения и отключения ключей для Wildberries и Ozon.
+
+Модуль предоставляет пользователю команды для отправки API ключей. Ключи
+шифруются и сохраняются в базе данных. При подключении Ozon ожидаются
+два значения: client_id и api_key, разделённые пробелом или двоеточием.
 Дата изменения: 2025-12-27
 """
 
@@ -14,16 +18,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
 from bot.keyboards.menu import main_menu
-from db.engine import AsyncSessionLocal
+from db import SessionLocal
 from db.repo import Repo
 from services.crypto import CryptoService
 
+
 router = Router()
 
+# Ограничения по длине ключей
 WB_KEY_MIN_LEN = 200
 WB_KEY_MAX_LEN = 2000
 OZON_KEY_MIN_LEN = 20
 OZON_KEY_MAX_LEN = 5000
+CLIENT_ID_MIN_LEN = 5
+CLIENT_ID_MAX_LEN = 64
 
 
 class KeyStates(StatesGroup):
@@ -43,8 +51,8 @@ def looks_like_key(text: str) -> bool:
 async def connect_wb(message: Message, state: FSMContext) -> None:
     await state.set_state(KeyStates.waiting_wb_key)
     await message.answer(
-        "Отправьте API ключ Wildberries одним сообщением.\n"
-        "Ключ будет сохранён в БД в зашифрованном виде.\n\n"
+        "Отправьте API‑ключ Wildberries одним сообщением.\n"
+        "Ключ будет сохранён в базе данных в зашифрованном виде.\n\n"
         "Чтобы отменить — отправьте: Отмена",
         reply_markup=main_menu(),
     )
@@ -54,8 +62,9 @@ async def connect_wb(message: Message, state: FSMContext) -> None:
 async def connect_ozon(message: Message, state: FSMContext) -> None:
     await state.set_state(KeyStates.waiting_ozon_key)
     await message.answer(
-        "Отправьте Api-Key Ozon одним сообщением.\n"
-        "Ключ будет сохранён в БД в зашифрованном виде.\n\n"
+        "Отправьте Client ID и Api‑Key Ozon в одном сообщении, разделив их пробелом или двоеточием.\n"
+        "Пример: <code>12345678:abcdef0123456789</code>.\n"
+        "Данные будут сохранены в базе в зашифрованном виде.\n\n"
         "Чтобы отменить — отправьте: Отмена",
         reply_markup=main_menu(),
     )
@@ -70,6 +79,7 @@ async def cancel(message: Message, state: FSMContext) -> None:
 @router.message(KeyStates.waiting_wb_key)
 async def save_wb_key(message: Message, state: FSMContext) -> None:
     key = normalize_key(message.text or "")
+    # Проверяем длину ключа
     if not looks_like_key(key) or not (WB_KEY_MIN_LEN <= len(key) <= WB_KEY_MAX_LEN):
         await message.answer(
             f"Ключ WB выглядит некорректно.\n"
@@ -80,18 +90,25 @@ async def save_wb_key(message: Message, state: FSMContext) -> None:
         return
 
     crypto = CryptoService()
-    encrypted = crypto.encrypt(key)
+    encrypted_key = crypto.encrypt(key)
 
-    async with AsyncSessionLocal() as session:
+    async with SessionLocal() as session:
         repo = Repo(session)
         user = await repo.get_or_create_user(
             tg_user_id=message.from_user.id,
             tg_username=message.from_user.username,
         )
-        await repo.upsert_credential(user.id, "wb", encrypted)
+        # Wildberries не требует client_id
+        await repo.upsert_credential(
+            user_id=user.id,
+            tg_user_id=message.from_user.id,
+            marketplace="wb",
+            encrypted_api_key=encrypted_key,
+            encrypted_client_id=None,
+        )
 
     await state.clear()
-    # удаляем исходное сообщение с ключом для безопасности
+    # Удаляем исходное сообщение с ключом для безопасности
     try:
         await message.delete()
     except Exception:
@@ -101,39 +118,59 @@ async def save_wb_key(message: Message, state: FSMContext) -> None:
 
 @router.message(KeyStates.waiting_ozon_key)
 async def save_ozon_key(message: Message, state: FSMContext) -> None:
-    key = normalize_key(message.text or "")
-    if not looks_like_key(key) or not (OZON_KEY_MIN_LEN <= len(key) <= OZON_KEY_MAX_LEN):
+    raw = normalize_key(message.text or "")
+    # Разделяем по пробелу или двоеточию
+    parts = re.split(r"[\s:]+", raw)
+    if len(parts) < 2:
         await message.answer(
-            f"Ключ Ozon выглядит некорректно.\n"
-            f"Ожидаем длину {OZON_KEY_MIN_LEN}–{OZON_KEY_MAX_LEN} символов.\n"
-            f"Попробуйте ещё раз или отправьте: Отмена",
+            "Нужно указать два значения: Client ID и Api‑Key, разделённые пробелом или двоеточием.\n"
+            "Пример: <code>12345678:abcdef0123456789</code>. Попробуйте ещё раз или отправьте: Отмена",
+            reply_markup=main_menu(),
+        )
+        return
+    client_id, api_key = parts[0], parts[1]
+    if not (CLIENT_ID_MIN_LEN <= len(client_id) <= CLIENT_ID_MAX_LEN):
+        await message.answer(
+            f"Client ID выглядит некорректно (длина {len(client_id)}). Ожидаем {CLIENT_ID_MIN_LEN}–{CLIENT_ID_MAX_LEN} символов.",
+            reply_markup=main_menu(),
+        )
+        return
+    if not (OZON_KEY_MIN_LEN <= len(api_key) <= OZON_KEY_MAX_LEN):
+        await message.answer(
+            f"Api‑Key выглядит некорректно (длина {len(api_key)}). Ожидаем {OZON_KEY_MIN_LEN}–{OZON_KEY_MAX_LEN} символов.",
             reply_markup=main_menu(),
         )
         return
 
     crypto = CryptoService()
-    encrypted = crypto.encrypt(key)
+    encrypted_key = crypto.encrypt(api_key)
+    encrypted_client_id = crypto.encrypt(client_id)
 
-    async with AsyncSessionLocal() as session:
+    async with SessionLocal() as session:
         repo = Repo(session)
         user = await repo.get_or_create_user(
             tg_user_id=message.from_user.id,
             tg_username=message.from_user.username,
         )
-        await repo.upsert_credential(user.id, "ozon", encrypted)
+        await repo.upsert_credential(
+            user_id=user.id,
+            tg_user_id=message.from_user.id,
+            marketplace="ozon",
+            encrypted_api_key=encrypted_key,
+            encrypted_client_id=encrypted_client_id,
+        )
 
     await state.clear()
-    # удаляем исходное сообщение с ключом для безопасности
     try:
         await message.delete()
     except Exception:
         pass
-    await message.answer("Ключ Ozon сохранён. Мониторинг включён.", reply_markup=main_menu())
+    await message.answer("Учётные данные Ozon сохранены. Мониторинг включён.", reply_markup=main_menu())
 
 
 @router.message(F.text == "Отключить WB")
 async def disable_wb(message: Message) -> None:
-    async with AsyncSessionLocal() as session:
+    async with SessionLocal() as session:
         repo = Repo(session)
         user = await repo.get_or_create_user(
             tg_user_id=message.from_user.id,
@@ -145,7 +182,7 @@ async def disable_wb(message: Message) -> None:
 
 @router.message(F.text == "Отключить Ozon")
 async def disable_ozon(message: Message) -> None:
-    async with AsyncSessionLocal() as session:
+    async with SessionLocal() as session:
         repo = Repo(session)
         user = await repo.get_or_create_user(
             tg_user_id=message.from_user.id,

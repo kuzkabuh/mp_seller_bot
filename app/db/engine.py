@@ -1,14 +1,15 @@
+# Версия файла: 2.0.0
+# Описание: Совместимость с прежним импортом AsyncSessionLocal.
+# Дата изменения: 2025-12-27
+
 """
-Версия файла: 1.0.0
-Описание: SQLAlchemy async engine/session для mp_seller_bot
-Дата изменения: 2025-12-27
+Этот модуль сохраняет обратную совместимость с кодом, который импортировал
+``AsyncSessionLocal`` из ``db.engine``. В новой архитектуре
+асинхронная сессия определяется в ``db/__init__.py`` как ``SessionLocal``.
+
+Чтобы исключить ошибку ``settings.postgres_dsn`` и дублирование движков, этот
+файл экспортирует только сессию, а создание движка расположено в
+``db/__init__.py``.
 """
 
-from __future__ import annotations
-
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from config import settings
-
-engine = create_async_engine(settings.postgres_dsn, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+from db import SessionLocal as AsyncSessionLocal
