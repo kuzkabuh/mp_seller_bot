@@ -25,6 +25,8 @@ from logging_config import setup_logging
 from bot.handlers import router as bot_router
 from workers.notifier import worker_loop
 
+from aiohttp import web
+
 logger = logging.getLogger("main")
 
 
@@ -69,6 +71,12 @@ async def main() -> None:
         # Регистрируем хук при старте диспетчера
         dp.startup.register(on_startup)
         app = aiohttp.web.Application()
+
+        async def health_handler(request):
+            return web.Response(text="OK")
+
+        app.router.add_get("/health", health_handler)
+        
         # Создаём обработчик запросов
         handler = SimpleRequestHandler(dp, bot, secret_token=settings.webhook_secret)
         handler.register(app, path=settings.webhook_path)
