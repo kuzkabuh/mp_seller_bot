@@ -1,9 +1,9 @@
 """
-Версия файла: 1.3.0
-Описание: Telegram‑хэндлеры с поддержкой многоуровневого меню, FSM и вебхуков
-Дата изменения: 2025-12-27
+Версия файла: 1.3.1
+Описание: Telegram-хэндлеры с поддержкой многоуровневого меню, FSM и вебхуков
+Дата изменения: 2025-12-28
 
-Этот модуль содержит обработчики сообщений для Telegram‑бота. Он
+Этот модуль содержит обработчики сообщений для Telegram-бота. Он
 реализует несколько функций:
 
 * Приветствие пользователя и вывод главного меню с разделами («Заказы»,
@@ -52,7 +52,7 @@ from bot.key_store import (
 )
 from config import settings
 from db import SessionLocal
-from db.models import MarketplaceAccount
+from db.models import MarketplaceCredential
 from services.analytics_service import AnalyticsService
 
 logger = logging.getLogger("handlers")
@@ -406,9 +406,9 @@ async def btn_disable_wb(message: Message, state: FSMContext) -> None:
     """Деактивирует аккаунт Wildberries."""
     tg_user_id = message.from_user.id if message.from_user else 0
     async with SessionLocal() as session:
-        q = select(MarketplaceAccount).where(
-            MarketplaceAccount.tg_user_id == tg_user_id,
-            MarketplaceAccount.marketplace == "wb",
+        q = select(MarketplaceCredential).where(
+            MarketplaceCredential.tg_user_id == tg_user_id,
+            MarketplaceCredential.marketplace == "wb",
         )
         res = await session.execute(q)
         acc = res.scalar_one_or_none()
@@ -423,9 +423,9 @@ async def btn_disable_ozon(message: Message, state: FSMContext) -> None:
     """Деактивирует аккаунт Ozon."""
     tg_user_id = message.from_user.id if message.from_user else 0
     async with SessionLocal() as session:
-        q = select(MarketplaceAccount).where(
-            MarketplaceAccount.tg_user_id == tg_user_id,
-            MarketplaceAccount.marketplace == "ozon",
+        q = select(MarketplaceCredential).where(
+            MarketplaceCredential.tg_user_id == tg_user_id,
+            MarketplaceCredential.marketplace == "ozon",
         )
         res = await session.execute(q)
         acc = res.scalar_one_or_none()

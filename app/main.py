@@ -1,3 +1,8 @@
+# main.py
+# Версия файла: 1.1.2
+# Дата изменения: 2025-12-28
+# Главный файл бота
+
 from __future__ import annotations
 
 import asyncio
