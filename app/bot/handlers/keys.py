@@ -1,5 +1,5 @@
 """
-Версия файла: 1.0.0
+Версия файла: 1.0.1
 Описание: Подключение/отключение ключей WB/Ozon для mp_seller_bot
 Дата изменения: 2025-12-27
 """
@@ -91,6 +91,11 @@ async def save_wb_key(message: Message, state: FSMContext) -> None:
         await repo.upsert_credential(user.id, "wb", encrypted)
 
     await state.clear()
+    # удаляем исходное сообщение с ключом для безопасности
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer("Ключ Wildberries сохранён. Мониторинг включён.", reply_markup=main_menu())
 
 
@@ -118,6 +123,11 @@ async def save_ozon_key(message: Message, state: FSMContext) -> None:
         await repo.upsert_credential(user.id, "ozon", encrypted)
 
     await state.clear()
+    # удаляем исходное сообщение с ключом для безопасности
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer("Ключ Ozon сохранён. Мониторинг включён.", reply_markup=main_menu())
 
 
