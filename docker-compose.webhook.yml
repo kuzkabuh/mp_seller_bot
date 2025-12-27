@@ -1,0 +1,82 @@
+# Версия файла: 1.0.0
+# Описание: Docker Compose для mp_seller_bot (bot + postgres + nginx + certbot) под webhook/HTTPS
+# Дата изменения: 2025-12-28
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mpbot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mp_seller_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-mpbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - mpbot_pgdata:/var/lib/postgresql/data
+    networks:
+      - mpbot_net
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mpbot_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # ВАЖНО: включаем webhook режим
+      WEBHOOK_ENABLED: "1"
+      WEBHOOK_BASE_URL: "https://mpsellerbot.kuzkabuh.ru"
+      WEBHOOK_LISTEN_HOST: "0.0.0.0"
+      WEBHOOK_LISTEN_PORT: "8000"
+      # WEBHOOK_SECRET должен быть в .env (не хардкодим)
+      POSTGRES_HOST: "db"
+    depends_on:
+      - db
+    networks:
+      - mpbot_net
+    expose:
+      - "8000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: mpbot_nginx
+    restart: unless-stopped
+    depends_on:
+      - bot
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_www:/var/www/certbot:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - mpbot_net
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: mpbot_certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_www:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+    entrypoint: /bin/sh
+    command: >
+      -c "trap exit TERM;
+          while :; do
+            sleep 12h & wait $${!};
+            certbot renew --webroot -w /var/www/certbot --quiet;
+          done"
+    networks:
+      - mpbot_net
+
+volumes:
+  mpbot_pgdata:
+  certbot_www:
+  letsencrypt:
+
+networks:
+  mpbot_net:
+    driver: bridge

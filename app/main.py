@@ -1,14 +1,13 @@
 # main.py
 # Версия файла: 1.1.4
-# Описание: Главный файл Telegram-бота mp_seller_bot (polling/webhook, health, graceful shutdown, воркер уведомлений)
 # Дата изменения: 2025-12-28
+# Главный файл бота (polling/webhook), /health + статус воркера и БД
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import signal
 from typing import Optional
 
 from aiohttp import web
@@ -18,10 +17,10 @@ from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from config import settings
-from db import init_db
+from db import db_ping, init_db
 from logging_config import setup_logging
 from bot.handlers import router as main_router
-from workers.notifier import worker_loop
+from workers.notifier import get_worker_health, worker_loop
 
 logger = logging.getLogger("main")
 
@@ -109,41 +108,22 @@ def _get_bot_token() -> str:
     return token.strip()
 
 
-def _validate_webhook_settings() -> None:
-    """
-    Мягкая валидация webhook-настроек (без падения),
-    чтобы избежать типичных ошибок при деплое.
-    """
-    if not _webhook_enabled():
-        return
-
-    base_url = _get_webhook_base_url()
-    secret = _get_webhook_secret()
-
-    if not base_url:
-        logger.warning("WEBHOOK_BASE_URL пустой. Webhook-режим включен, но webhook не будет установлен.")
-        return
-
-    if not (base_url.startswith("https://") or base_url.startswith("http://")):
-        logger.warning("WEBHOOK_BASE_URL должен начинаться с http:// или https://. Сейчас: %s", base_url)
-
-    if base_url.startswith("http://"):
-        logger.warning("WEBHOOK_BASE_URL использует http://. Для Telegram webhook рекомендуется https://.")
-
-    if not secret:
-        logger.warning(
-            "WEBHOOK_SECRET не задан. Будет использован путь /webhook без секрета. "
-            "Это небезопасно — задайте WEBHOOK_SECRET длиной 32+ символа."
-        )
-    elif len(secret) < 32:
-        logger.warning(
-            "WEBHOOK_SECRET слишком короткий (%s). Рекомендуется 32+ символа.",
-            len(secret),
-        )
-
-
 async def health_handler(_: web.Request) -> web.Response:
-    return web.json_response({"status": "ok"})
+    """
+    /health: пригодится для nginx, мониторинга и отладки.
+    """
+    worker = get_worker_health()
+    db_ok = await db_ping()
+
+    return web.json_response(
+        {
+            "status": "ok",
+            "db_ok": bool(db_ok),
+            "worker": worker,
+            "webhook_enabled": _webhook_enabled(),
+            "webhook_path": _get_webhook_path(),
+        }
+    )
 
 
 async def on_startup(bot: Bot) -> None:
@@ -169,7 +149,6 @@ async def on_startup(bot: Bot) -> None:
 
 
 async def on_shutdown(bot: Bot) -> None:
-    # В webhook-режиме корректно снимаем webhook
     if _webhook_enabled():
         try:
             await bot.delete_webhook(drop_pending_updates=False)
@@ -178,49 +157,18 @@ async def on_shutdown(bot: Bot) -> None:
             logger.exception("Failed to delete webhook")
 
 
-def _install_signal_handlers(stop_event: asyncio.Event) -> None:
-    """
-    Корректная остановка по SIGINT/SIGTERM:
-    - в Docker SIGTERM приходит при `docker stop`
-    - локально SIGINT при Ctrl+C
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-
-    def _request_stop() -> None:
-        if not stop_event.is_set():
-            stop_event.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError):
-            # NotImplementedError: например, Windows
-            # RuntimeError: если loop не поддерживает обработчики
-            pass
-
-
 async def run_webhook(bot: Bot, dp: Dispatcher) -> None:
     """
-    Запуск aiohttp сервера для webhook + /health.
-    Остановка через stop_event (SIGINT/SIGTERM) или отмену задачи.
+    Запуск aiohttp сервера для webhook + /health
     """
-    stop_event = asyncio.Event()
-    _install_signal_handlers(stop_event)
-
     app = web.Application()
 
-    # /health
     app.router.add_get("/health", health_handler)
 
-    # webhook handler
     path = _get_webhook_path()
     request_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     request_handler.register(app, path=path)
 
-    # ВАЖНО: bot передаем ИМЕННО как keyword-arg, чтобы startup/shutdown получали bot
     setup_application(app, dp, bot=bot)
 
     host = _get_webhook_listen_host()
@@ -230,19 +178,10 @@ async def run_webhook(bot: Bot, dp: Dispatcher) -> None:
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
+    await site.start()
 
-    try:
-        await site.start()
-        await stop_event.wait()
-        logger.info("Stop signal received. Shutting down webhook server...")
-    except asyncio.CancelledError:
-        logger.info("Webhook server task cancelled. Shutting down...")
-        raise
-    finally:
-        try:
-            await runner.cleanup()
-        except Exception:
-            logger.exception("Failed to cleanup aiohttp runner")
+    while True:
+        await asyncio.sleep(3600)
 
 
 async def run_polling(bot: Bot, dp: Dispatcher) -> None:
@@ -258,30 +197,15 @@ async def run_polling(bot: Bot, dp: Dispatcher) -> None:
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
-async def _shutdown_worker(task: asyncio.Task) -> None:
-    if task.done():
-        return
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        logger.exception("Notifier worker failed during shutdown")
-
-
 async def main() -> None:
     setup_logging()
     logger.info("Starting mp_seller_bot...")
-
-    _validate_webhook_settings()
 
     await init_db()
 
     dp = Dispatcher()
     dp.include_router(main_router)
 
-    # регистрируем startup/shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
@@ -292,7 +216,6 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # воркер уведомлений (новые заказы и т.п.)
     worker_task = asyncio.create_task(worker_loop(bot), name="notifier_worker")
 
     try:
@@ -301,11 +224,11 @@ async def main() -> None:
         else:
             await run_polling(bot, dp)
     finally:
-        await _shutdown_worker(worker_task)
+        worker_task.cancel()
         try:
-            await bot.session.close()
-        except Exception:
-            logger.exception("Failed to close bot session")
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
