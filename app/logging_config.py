@@ -1,34 +1,28 @@
-# Версия файла: 1.1.0
-# Описание: Настройка логирования (единый формат, уровни, безопасный вывод)
-# Дата изменения: 2025-12-27
+"""
+Версия файла: 1.0.0
+Описание: Настройка логирования для приложения.
+Дата изменения: 2025-12-27
+
+Этот модуль содержит функцию `setup_logging`, которая конфигурирует
+настройки логирования для всей программы. Логи выводятся в stdout с
+форматом времени и уровнем, указанным в конфигурации.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
 
 
 def setup_logging(level: str = "INFO") -> None:
-    lvl = getattr(logging, level.upper(), logging.INFO)
+    """Настраивает базовую конфигурацию логирования.
 
-    root = logging.getLogger()
-    root.setLevel(lvl)
-
-    for h in list(root.handlers):
-        root.removeHandler(h)
-
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(
-        fmt="[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
+    Args:
+        level: Уровень логирования (например, "DEBUG", "INFO").
+    """
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="[%(asctime)s][%(levelname)s][%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
-    handler.setFormatter(formatter)
-    root.addHandler(handler)
-
-    # Чуть уменьшаем шум библиотек
-    logging.getLogger("aiogram").setLevel(max(lvl, logging.INFO))
-    logging.getLogger("sqlalchemy.engine").setLevel(max(lvl, logging.WARNING))
-
-    # На всякий случай: отключаем буферизацию stdout в контейнере
-    os.environ["PYTHONUNBUFFERED"] = "1"
