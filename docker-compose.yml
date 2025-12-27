@@ -1,0 +1,36 @@
+# Версия файла: 1.0.0
+# Описание: Docker Compose для запуска бота и PostgreSQL
+# Дата изменения: 2025-12-27
+
+services:
+  db:
+    image: postgres:16
+    container_name: mp_seller_bot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mp_seller_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-mp_seller_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mp_seller_bot}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - mp_seller_bot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mp_seller_bot} -d ${POSTGRES_DB:-mp_seller_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  bot:
+    build:
+      context: .
+    container_name: mp_seller_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mp_seller_bot_pgdata:
