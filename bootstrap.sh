@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Версия файла: 1.0.0
-# Описание: Bootstrap-инсталлер mp_seller_bot (запуск одной командой через curl|bash), установка в /opt/mp_seller_bot
+# Версия файла: 1.0.1
+# Описание: Bootstrap-инсталлер mp_seller_bot (одна команда через curl|bash), git clone/pull по SSH, установка в /opt/mp_seller_bot
 # Дата изменения: 2025-12-27
 
 set -Eeuo pipefail
 
-REPO_URL_DEFAULT="https://github.com/kuzkabuh/mp_seller_bot.git"
+# По умолчанию используем SSH-URL (вам подходит, раз SSH настроен)
+REPO_SSH_DEFAULT="git@github.com:kuzkabuh/mp_seller_bot.git"
 BRANCH_DEFAULT="main"
 APP_DIR_DEFAULT="/opt/mp_seller_bot"
 SERVICE_NAME="mp_seller_bot"
@@ -31,9 +32,9 @@ require_root() {
 }
 
 install_base_packages() {
-  log "Установка базовых пакетов (git, curl)..."
+  log "Установка базовых пакетов (git, curl, openssh-client)..."
   apt-get update -y
-  apt-get install -y git curl ca-certificates
+  apt-get install -y git curl ca-certificates openssh-client
 }
 
 install_docker_if_needed() {
@@ -74,23 +75,76 @@ install_docker_if_needed() {
   fi
 }
 
-clone_or_update_repo() {
-  local repo_url="$1"
+prepare_ssh_for_github() {
+  # Важно: скрипт запускается от root, значит ключи должны быть доступны root'у
+  # Если ваш ключ лежит у другого пользователя (например artem), можно:
+  # 1) запускать скрипт от этого пользователя, или
+  # 2) скопировать ключи в /root/.ssh с корректными правами
+  log "Проверка SSH для GitHub..."
+
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+
+  # Добавляем known_hosts, чтобы не было интерактивного запроса
+  if ! grep -q "github.com" /root/.ssh/known_hosts 2>/dev/null; then
+    log "Добавляю github.com в known_hosts..."
+    ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null || true
+    chmod 600 /root/.ssh/known_hosts || true
+  fi
+
+  # Быстрая проверка наличия приватных ключей
+  local key_count
+  key_count="$(ls -1 /root/.ssh/id_* 2>/dev/null | grep -E "id_(rsa|ed25519)$" | wc -l | tr -d ' ')"
+  if [[ "${key_count}" == "0" ]]; then
+    log "В /root/.ssh не найден приватный ключ (id_rsa или id_ed25519)."
+    log "Если SSH уже настроен у другого пользователя, перенесите ключи в /root/.ssh или запускайте установку от того пользователя."
+    log "Пример переноса (осторожно):"
+    echo "  sudo mkdir -p /root/.ssh"
+    echo "  sudo cp -a /home/<user>/.ssh/id_ed25519 /root/.ssh/"
+    echo "  sudo cp -a /home/<user>/.ssh/id_ed25519.pub /root/.ssh/"
+    echo "  sudo chmod 700 /root/.ssh && sudo chmod 600 /root/.ssh/id_ed25519 && sudo chmod 644 /root/.ssh/id_ed25519.pub"
+    die "SSH ключ для root не найден."
+  fi
+
+  # Проверка доступа к GitHub (не считается ошибкой, если GitHub отвечает кодом 1 с welcome-msg)
+  set +e
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -T git@github.com 2>&1 | tee /tmp/github_ssh_test.log >/dev/null
+  local rc=$?
+  set -e
+
+  if grep -qi "successfully authenticated" /tmp/github_ssh_test.log || grep -qi "You've successfully authenticated" /tmp/github_ssh_test.log; then
+    log "SSH-аутентификация GitHub: OK"
+    return 0
+  fi
+
+  # GitHub часто возвращает rc=1 даже при успешной аутентификации (без shell access)
+  if grep -qi "Hi " /tmp/github_ssh_test.log && grep -qi "GitHub does not provide shell access" /tmp/github_ssh_test.log; then
+    log "SSH-аутентификация GitHub: OK (no shell access — это нормально)"
+    return 0
+  fi
+
+  log "Не удалось подтвердить SSH-доступ к GitHub от root."
+  log "Вывод проверки сохранён: /tmp/github_ssh_test.log"
+  die "Почините SSH-доступ (ключ/права/агент) и повторите."
+}
+
+clone_or_update_repo_ssh() {
+  local repo_ssh="$1"
   local app_dir="$2"
   local branch="$3"
 
   mkdir -p "${app_dir}"
 
   if [[ -d "${app_dir}/.git" ]]; then
-    log "Репозиторий уже есть в ${app_dir}. Обновляю..."
+    log "Репозиторий уже есть в ${app_dir}. Обновляю по SSH..."
     cd "${app_dir}"
-    git remote set-url origin "${repo_url}"
+    git remote set-url origin "${repo_ssh}"
     git fetch --all --prune
     git checkout "${branch}"
     git pull origin "${branch}"
   else
-    log "Клонирую ${repo_url} -> ${app_dir} (ветка: ${branch})"
-    git clone --branch "${branch}" "${repo_url}" "${app_dir}"
+    log "Клонирую по SSH ${repo_ssh} -> ${app_dir} (ветка: ${branch})"
+    git clone --branch "${branch}" "${repo_ssh}" "${app_dir}"
     cd "${app_dir}"
   fi
 
@@ -130,7 +184,7 @@ EOF
   fi
 
   chmod 600 "${env_file}"
-  log "Создан ${env_file}. Не забудьте заполнить BOT_TOKEN и FERNET_KEY."
+  log "Создан ${env_file}. Заполните BOT_TOKEN и FERNET_KEY."
 }
 
 create_systemd_unit() {
@@ -170,39 +224,27 @@ start_app() {
   log "Контейнеры:"
   docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
-  log "Статус systemd:"
+  log "Перезапуск systemd-сервиса (на случай автозапуска):"
   systemctl restart "${SERVICE_NAME}.service" || true
   systemctl status "${SERVICE_NAME}.service" --no-pager || true
-}
-
-print_usage() {
-  echo "Использование:"
-  echo "  sudo bash <(curl -fsSL https://raw.githubusercontent.com/kuzkabuh/mp_seller_bot/main/bootstrap.sh)"
-  echo
-  echo "Параметры через ENV (опционально):"
-  echo "  REPO_URL=... BRANCH=... APP_DIR=... sudo -E bash <(curl -fsSL .../bootstrap.sh)"
 }
 
 main() {
   require_root
 
-  local repo_url="${REPO_URL:-${REPO_URL_DEFAULT}}"
+  local repo_ssh="${REPO_SSH:-${REPO_SSH_DEFAULT}}"
   local branch="${BRANCH:-${BRANCH_DEFAULT}}"
   local app_dir="${APP_DIR:-${APP_DIR_DEFAULT}}"
 
   log "Параметры:"
-  log "  REPO_URL=${repo_url}"
+  log "  REPO_SSH=${repo_ssh}"
   log "  BRANCH=${branch}"
   log "  APP_DIR=${app_dir}"
 
-  if [[ -z "${repo_url}" ]]; then
-    print_usage
-    die "REPO_URL пуст."
-  fi
-
   install_base_packages
   install_docker_if_needed
-  clone_or_update_repo "${repo_url}" "${app_dir}" "${branch}"
+  prepare_ssh_for_github
+  clone_or_update_repo_ssh "${repo_ssh}" "${app_dir}" "${branch}"
   ensure_env "${app_dir}"
   create_systemd_unit "${app_dir}"
   start_app "${app_dir}"
