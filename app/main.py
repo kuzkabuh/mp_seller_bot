@@ -1,50 +1,39 @@
-"""
-Версия файла: 1.0.0
-Описание: Точка входа mp_seller_bot (aiogram + фоновые воркеры)
-Дата изменения: 2025-12-27
-"""
+# Версия файла: 1.1.0
+# Описание: Точка входа mp_seller_bot (инициализация логов, БД, Telegram)
+# Дата изменения: 2025-12-27
 
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from aiogram import Bot
+from aiogram import Bot, Dispatcher
 
-from bot.dispatcher import build_dispatcher
 from config import settings
-from db.engine import engine
-from db.models import Base
-from logging_setup import setup_logging
-from workers.notifier import worker_loop
+from db import init_db
+from logging_config import setup_logging
+from bot.handlers import router as main_router
 
 logger = logging.getLogger("main")
 
 
-async def init_db() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-
 async def main() -> None:
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(settings.log_level)
+
     logger.info("Starting mp_seller_bot...")
+
+    # Проверим, что ключ шифрования задан
+    if not settings.fernet_key or len(settings.fernet_key.strip()) < 10:
+        raise RuntimeError("FERNET_KEY не задан или слишком короткий. Укажите корректный ключ в .env")
 
     await init_db()
 
-    bot = Bot(token=settings.BOT_TOKEN)
-    dp = build_dispatcher()
+    bot = Bot(token=settings.bot_token)
+    dp = Dispatcher()
+    dp.include_router(main_router)
 
-    worker_task = asyncio.create_task(worker_loop(bot))
-
-    try:
-        await dp.start_polling(bot)
-    finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except Exception:
-            pass
+    logger.info("Bot started. Polling...")
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
