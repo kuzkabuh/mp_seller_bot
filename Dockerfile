@@ -1,27 +1,18 @@
-# Версия файла: 1.0.0
-# Описание: Docker-образ для сервиса Telegram-бота mp_seller_bot
-# Дата изменения: 2025-12-27
-
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY app/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY alembic.ini /app/alembic.ini
-COPY alembic /app/alembic
-COPY app /app/app
-COPY deploy /app/deploy
+COPY app /app
 
-COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python", "-m", "main"]
