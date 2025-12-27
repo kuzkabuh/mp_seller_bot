@@ -2,6 +2,11 @@
 Версия файла: 1.0.0
 Описание: /start и помощь для mp_seller_bot
 Дата изменения: 2025-12-27
+
+Этот модуль реализует обработчики для команды /start и раздела «Помощь».
+Он использует отдельную клавиатуру из ``bot.keyboards.menu`` и просто
+отправляет приветственное сообщение или справочную информацию. Эти
+обработчики регистрируются в диспетчере в файле ``bot/dispatcher.py``.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    """Приветственное сообщение для команды /start."""
     text = (
         "SellerBot: уведомления и аналитика заказов WB/Ozon.\n\n"
         "Что умею сейчас:\n"
@@ -30,6 +36,7 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(F.text == "Помощь")
 async def help_btn(message: Message) -> None:
+    """Отображает список команд и назначение кнопок."""
     text = (
         "Команды:\n"
         "/start — запуск\n\n"

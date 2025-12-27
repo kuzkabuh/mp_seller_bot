@@ -2,6 +2,10 @@
 Версия файла: 1.0.0
 Описание: Инициализация роутеров и диспетчера aiogram для mp_seller_bot
 Дата изменения: 2025-12-27
+
+Модуль ``dispatcher`` собирает все роутеры бота в единый объект
+Dispatcher. Благодаря этому разделы бота (start, keys, analytics,
+settings) находятся в отдельных модулях, что упрощает поддержку.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from bot.handlers.settings import router as settings_router
 
 
 def build_dispatcher() -> Dispatcher:
+    """Создаёт и настраивает Dispatcher с подключёнными роутерами."""
     dp = Dispatcher()
     dp.include_router(start_router)
     dp.include_router(keys_router)

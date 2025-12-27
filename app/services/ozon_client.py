@@ -1,6 +1,13 @@
-# Версия файла: 1.1.0
-# Описание: Реализация методов Ozon API (FBS/FBO postings)
-# Дата изменения: 2025-12-27
+"""
+Версия файла: 1.1.0
+Описание: Реализация методов Ozon API (FBS/FBO postings)
+Дата изменения: 2025-12-27
+
+Клиент ``OzonClient`` реализует запросы к API Ozon для получения
+FBS и FBO posting'ов. Для каждого запроса используются заголовки
+``Api-Key`` и ``Client-Id``. Этот класс используется воркером
+notifier для получения новых отправлений.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ from typing import Any, List
 
 
 class OzonClient:
-    def __init__(self, api_key: str, client_id: str):
+    def __init__(self, api_key: str, client_id: str) -> None:
         self.api_key = api_key
         self.client_id = client_id
 
