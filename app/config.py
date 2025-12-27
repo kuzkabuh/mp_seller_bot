@@ -1,43 +1,45 @@
-"""
-Версия файла: 1.0.0
-Описание: Конфигурация приложения (env -> настройки) для mp_seller_bot
-Дата изменения: 2025-12-27
-"""
+# Версия файла: 1.1.0
+# Описание: Централизованная конфигурация приложения (env -> настройки) + валидация
+# Дата изменения: 2025-12-27
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    """
+    Конфигурация бота. Все значения читаются из переменных окружения.
+    В Docker Compose они пробрасываются из .env файла.
+    """
 
-    BOT_TOKEN: str
-    FERNET_KEY: str
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    POSTGRES_HOST: str = "db"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "mp_seller_bot"
-    POSTGRES_USER: str = "mpbot"
-    POSTGRES_PASSWORD: str = "mpbot_password"
+    # Telegram
+    bot_token: str = Field(..., alias="BOT_TOKEN")
 
-    REDIS_HOST: str = "redis"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
+    # Crypto
+    fernet_key: str = Field(..., alias="FERNET_KEY")
 
-    POLL_INTERVAL_SECONDS: int = 60
-    LOG_LEVEL: str = "INFO"
+    # Postgres
+    postgres_host: str = Field("db", alias="POSTGRES_HOST")
+    postgres_port: int = Field(5432, alias="POSTGRES_PORT")
+    postgres_db: str = Field("mp_seller_bot", alias="POSTGRES_DB")
+    postgres_user: str = Field("mpbot", alias="POSTGRES_USER")
+    postgres_password: str = Field(..., alias="POSTGRES_PASSWORD")
 
-    @property
-    def postgres_dsn(self) -> str:
+    # Scheduler
+    poll_interval_seconds: int = Field(60, alias="POLL_INTERVAL_SECONDS")
+
+    # Logging
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+
+    def database_dsn(self) -> str:
         return (
-            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
-            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
-
-    @property
-    def redis_dsn(self) -> str:
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
 settings = Settings()
