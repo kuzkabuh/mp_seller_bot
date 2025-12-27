@@ -1,5 +1,5 @@
 # main.py
-# Версия файла: 1.1.2
+# Версия файла: 1.1.3
 # Дата изменения: 2025-12-28
 # Главный файл бота
 
@@ -73,6 +73,41 @@ def _webhook_enabled() -> bool:
     if flag is None:
         flag = os.getenv("WEBHOOK_ENABLED")
     return bool(base) or _bool_env(str(flag) if flag is not None else None)
+
+
+def _get_bot_token() -> str:
+    """
+    Получает токен бота из настроек или окружения.
+
+    Приоритет:
+    1. settings.BOT_TOKEN
+    2. settings.bot_token
+    3. переменная окружения BOT_TOKEN
+    4. переменная окружения TELEGRAM_BOT_TOKEN
+
+    Если ни один вариант не найден — поднимает RuntimeError
+    с понятным сообщением.
+    """
+    # из pydantic Settings: допускаем верхний и нижний регистр атрибута
+    token = getattr(settings, "BOT_TOKEN", None)
+    if not token:
+        token = getattr(settings, "bot_token", None)
+
+    # из окружения, если в settings не оказалось
+    if not token:
+        token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+
+    if not token:
+        logger.error(
+            "Не задан токен бота. Установите переменную окружения BOT_TOKEN "
+            "или TELEGRAM_BOT_TOKEN, либо поле bot_token / BOT_TOKEN в Settings."
+        )
+        raise RuntimeError(
+            "BOT_TOKEN (токен Telegram-бота) не найден в настройках. "
+            "Проверьте .env и конфигурацию Settings."
+        )
+
+    return token.strip()
 
 
 async def health_handler(_: web.Request) -> web.Response:
@@ -169,8 +204,11 @@ async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
+    # Получаем токен бота безопасно
+    token = _get_bot_token()
+
     bot = Bot(
-        token=settings.BOT_TOKEN,
+        token=token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
