@@ -1,44 +1,69 @@
-"""
-Версия файла: 1.0.0
-Описание: Клиент Ozon Seller API (скелет) для mp_seller_bot
-Дата изменения: 2025-12-27
-"""
+# Версия файла: 1.1.0
+# Описание: Реализация методов Ozon API (FBS/FBO postings)
+# Дата изменения: 2025-12-27
 
 from __future__ import annotations
 
 import httpx
+from typing import Any, List
 
 
 class OzonClient:
-    def __init__(self, api_key: str, client_id: str | None = None):
+    def __init__(self, api_key: str, client_id: str):
         self.api_key = api_key
         self.client_id = client_id
 
     def _headers(self) -> dict[str, str]:
-        headers = {
+        return {
             "Api-Key": self.api_key,
+            "Client-Id": self.client_id,
             "Content-Type": "application/json",
         }
-        if self.client_id:
-            headers["Client-Id"] = self.client_id
-        return headers
 
-    async def get_new_postings_fbs(self) -> list[dict]:
+    async def get_new_postings_fbs(self) -> List[dict[str, Any]]:
         """
-        Заглушка: Ozon FBS postings.
+        Получает список новых FBS posting'ов со статусом awaiting_packaging.
+        API Ozon: POST /v3/posting/fbs/list
         """
-        # TODO: реализовать эндпоинт Ozon postings FBS
-        return []
-
-    async def get_new_postings_fbo(self) -> list[dict]:
-        """
-        Заглушка: Ozon FBO postings.
-        """
-        # TODO: реализовать эндпоинт Ozon postings FBO
-        return []
-
-    async def _post(self, url: str, json_body: dict) -> dict:
+        url = "https://api-seller.ozon.ru/v3/posting/fbs/list"
+        payload = {
+            "filter": {
+                "status": "awaiting_packaging",
+            },
+            "with": {
+                "analytics_data": False,
+                "financial_data": False,
+            },
+            "dir": "ASC",
+            "limit": 50,
+            "offset": 0,
+        }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, headers=self._headers(), json=json_body)
-            r.raise_for_status()
-            return r.json()
+            response = await client.post(url, json=payload, headers=self._headers())
+            response.raise_for_status()
+            data = response.json()
+        return data.get("result", {}).get("postings", [])
+
+    async def get_new_postings_fbo(self) -> List[dict[str, Any]]:
+        """
+        Получает список новых FBO posting'ов.
+        API Ozon: POST /v2/posting/fbo/list
+        """
+        url = "https://api-seller.ozon.ru/v2/posting/fbo/list"
+        payload = {
+            "filter": {
+                "status": "awaiting_packaging",
+            },
+            "with": {
+                "analytics_data": False,
+                "financial_data": False,
+            },
+            "dir": "ASC",
+            "limit": 50,
+            "offset": 0,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=self._headers())
+            response.raise_for_status()
+            data = response.json()
+        return data.get("result", {}).get("postings", [])
