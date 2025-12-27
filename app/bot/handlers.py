@@ -1,5 +1,5 @@
-# Версия файла: 1.1.2
-# Описание: Хэндлеры Telegram-бота (меню, подключение API ключей, статусы, удаление сообщений, кнопки)
+# Версия файла: 1.2.0
+# Описание: Хэндлеры Telegram-бота (добавлена FSM для Ozon: client_id + token)
 # Дата изменения: 2025-12-27
 
 from __future__ import annotations
@@ -9,18 +9,28 @@ from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
+from bot.keyboards.menu import main_menu
+from bot.key_store import (
+    get_ozon_credentials,
+    get_wb_api_key,
+    upsert_ozon_credentials,
+    upsert_wb_api_key,
+)
 from config import settings
 from db import SessionLocal
-from bot.key_store import get_api_key, upsert_api_key
-from bot.keyboards.menu import main_menu
-from db.models import MarketplaceAccount
-from sqlalchemy import delete
 
 logger = logging.getLogger("handlers")
 
 router = Router()
+
+
+class OzonStates(StatesGroup):
+    waiting_client_id = State()
+    waiting_token = State()
 
 
 def _mask_key(key: str) -> str:
@@ -31,36 +41,28 @@ def _mask_key(key: str) -> str:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    """
-    Отправляет приветственное сообщение и отображает главное меню.
-    """
     text = (
-        "<b>Seller\u00a0Bot</b> (WB\u00a0/\u00a0Ozon)\n\n"
-        "Используйте меню ниже или команды:\n"
-        "• <code>/connect_wb</code> — подключить Wildberries (API ключ)\n"
-        "• <code>/connect_ozon</code> — подключить Ozon (API ключ)\n"
-        "• <code>/status</code> — статус подключений\n"
-        "• <code>/help</code> — справка\n\n"
-        "<i>Важно: ваши API‑ключи сохраняются в базе данных в зашифрованном виде.</i>"
+        "<b>Seller Bot</b> — уведомления и аналитика для WB / Ozon\n\n"
+        "Выберите действие кнопками или используйте команды:\n"
+        "• /connect_wb — подключить Wildberries\n"
+        "• /connect_ozon — подключить Ozon\n"
+        "• /status — статус подключений\n"
+        "• /help — помощь"
     )
-    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu())
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    text = (
-        "<b>Справка</b>:\n\n"
-        "1. Подключите маркетплейсы:\n"
-        "   • <code>/connect_wb</code> — сохранить API‑ключ Wildberries\n"
-        "   • <code>/connect_ozon</code> — сохранить API‑ключ Ozon\n\n"
-        "2. Проверьте статус:\n"
-        "   • <code>/status</code> — показать подключённые аккаунты\n\n"
-        "Далее мы планируем добавить:\n"
-        "• уведомления по FBS/FBO\n"
-        "• аналитику и подсказки по выручке\n"
-        "• расписание обновлений и многое другое."
+    await message.answer(
+        "Поддерживаемые действия:\n"
+        "• Подключить Wildberries — сохранить API ключ WB\n"
+        "• Подключить Ozon — сохранить Client ID и API ключ Ozon\n"
+        "• Отключить WB / Ozon — остановить мониторинг\n"
+        "• Статус — вывести список подключённых аккаунтов\n"
+        "• В будущем появятся уведомления о заказах и аналитика",
+        reply_markup=main_menu(),
     )
-    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 @router.message(Command("status"))
@@ -71,150 +73,145 @@ async def cmd_status(message: Message) -> None:
         return
 
     async with SessionLocal() as session:
-        wb_key = await get_api_key(session, tg_user_id, "wb", settings.fernet_key)
-        ozon_key = await get_api_key(session, tg_user_id, "ozon", settings.fernet_key)
+        wb_key = await get_wb_api_key(session, tg_user_id, settings.fernet_key)
+        ozon_creds = await get_ozon_credentials(session, tg_user_id, settings.fernet_key)
 
     wb_status = f"подключен ({_mask_key(wb_key)})" if wb_key else "не подключен"
-    ozon_status = f"подключен ({_mask_key(ozon_key)})" if ozon_key else "не подключен"
+    ozon_status = (
+        f"подключен (Client ID: {_mask_key(ozon_creds[0])}, Token: {_mask_key(ozon_creds[1])})"
+        if ozon_creds
+        else "не подключен"
+    )
 
     await message.answer(
-        f"<b>Статус подключений</b>:\n"
+        "Статус подключений:\n"
         f"• Wildberries: {wb_status}\n"
         f"• Ozon: {ozon_status}",
         reply_markup=main_menu(),
-        parse_mode="HTML",
     )
 
 
+# === Обработчики для кнопок ===
+
+@router.message(F.text.casefold() == "подключить wildberries")
 @router.message(Command("connect_wb"))
-async def cmd_connect_wb(message: Message) -> None:
+async def btn_connect_wb(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
-        "Пожалуйста, отправьте API‑ключ <b>Wildberries</b> одним сообщением.\n"
-        "Ключ будет сохранён в базе данных в зашифрованном виде.",
+        "Отправьте API ключ Wildberries одним сообщением.\n"
+        "Ключ будет сохранён в зашифрованном виде.\n\n"
+        "Чтобы отменить — отправьте /cancel",
         reply_markup=main_menu(),
-        parse_mode="HTML",
     )
+    await state.set_state("waiting_wb_key")
 
 
+@router.message(F.text.casefold() == "подключить ozon")
 @router.message(Command("connect_ozon"))
-async def cmd_connect_ozon(message: Message) -> None:
+async def btn_connect_ozon(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
-        "Пожалуйста, отправьте API‑ключ <b>Ozon</b> одним сообщением.\n"
-        "Ключ будет сохранён в базе данных в зашифрованном виде.",
+        "Введите Client ID Ozon.\n"
+        "После этого я попрошу токен.\n\n"
+        "Чтобы отменить — отправьте /cancel",
         reply_markup=main_menu(),
-        parse_mode="HTML",
     )
+    await state.set_state(OzonStates.waiting_client_id)
 
 
-# --- Обработчики нажатий кнопок меню ---
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=main_menu())
 
 
-@router.message(F.text == "Подключить Wildberries")
-async def btn_connect_wb(message: Message) -> None:
-    await cmd_connect_wb(message)
-
-
-@router.message(F.text == "Подключить Ozon")
-async def btn_connect_ozon(message: Message) -> None:
-    await cmd_connect_ozon(message)
-
-
-@router.message(F.text == "Помощь")
-async def btn_help(message: Message) -> None:
-    await cmd_help(message)
-
-
-@router.message(F.text == "Отключить WB")
+@router.message(F.text.casefold() == "отключить wb")
 async def btn_disable_wb(message: Message) -> None:
+    # деактивируем в базе
     tg_user_id = message.from_user.id if message.from_user else 0
-    if tg_user_id == 0:
-        return
     async with SessionLocal() as session:
-        await session.execute(
-            delete(MarketplaceAccount).where(
+        q = (
+            select(MarketplaceAccount)
+            .where(
                 MarketplaceAccount.tg_user_id == tg_user_id,
                 MarketplaceAccount.marketplace == "wb",
             )
         )
-        await session.commit()
-    await message.answer("Подключение <b>Wildberries</b> отключено.", reply_markup=main_menu(), parse_mode="HTML")
+        res = await session.execute(q)
+        row = res.scalar_one_or_none()
+        if row:
+            row.is_active = False
+            await session.commit()
+    await message.answer("Wildberries отключён.", reply_markup=main_menu())
 
 
-@router.message(F.text == "Отключить Ozon")
+@router.message(F.text.casefold() == "отключить ozon")
 async def btn_disable_ozon(message: Message) -> None:
     tg_user_id = message.from_user.id if message.from_user else 0
-    if tg_user_id == 0:
-        return
     async with SessionLocal() as session:
-        await session.execute(
-            delete(MarketplaceAccount).where(
+        q = (
+            select(MarketplaceAccount)
+            .where(
                 MarketplaceAccount.tg_user_id == tg_user_id,
                 MarketplaceAccount.marketplace == "ozon",
             )
         )
-        await session.commit()
-    await message.answer("Подключение <b>Ozon</b> отключено.", reply_markup=main_menu(), parse_mode="HTML")
+        res = await session.execute(q)
+        row = res.scalar_one_or_none()
+        if row:
+            row.is_active = False
+            await session.commit()
+    await message.answer("Ozon отключён.", reply_markup=main_menu())
 
 
-@router.message(F.text == "Аналитика за 7 дней")
-async def btn_analytics_stub(message: Message) -> None:
-    await message.answer(
-        "Функция аналитики пока находится в разработке.\n"
-        "Скоро вы сможете видеть статистику продаж и заказы за последние 7 дней.",
-        reply_markup=main_menu(),
-        parse_mode="HTML",
-    )
+# === Состояния для записи ключей ===
 
-
-@router.message(F.text == "Подсказки по выручке")
-async def btn_revenue_tips_stub(message: Message) -> None:
-    await message.answer(
-        "Функция подсказок по выручке пока находится в разработке.\n"
-        "Скоро вы будете получать полезные советы по увеличению продаж.",
-        reply_markup=main_menu(),
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text)
-async def catch_text(message: Message) -> None:
-    """
-    Обрабатывает текстовые сообщения, предполагая, что это токен API.
-    На текущем этапе используется простая эвристика для определения маркетплейса.
-    """
+@router.message(FSMContext.state == "waiting_wb_key")
+async def process_wb_key(message: Message, state: FSMContext) -> None:
     tg_user_id = message.from_user.id if message.from_user else 0
-    if tg_user_id == 0:
-        return
-
-    text = (message.text or "").strip()
-    if not text:
-        return
-
-    # Простая эвристика: если длина >= 200 — считаем WB, иначе просим уточнить
-    marketplace: Optional[str] = None
-    if len(text) >= 200:
-        marketplace = "wb"
-
-    if marketplace is None:
-        await message.answer(
-            "Я не понял, это ключ какого маркетплейса.\n"
-            "Выберите пункт меню «Подключить Wildberries» или «Подключить Ozon» "
-            "и затем пришлите ключ одним сообщением.",
-            reply_markup=main_menu(),
-        )
-        return
-
+    api_key = (message.text or "").strip()
+    # Сохраняем и удаляем сообщение
     async with SessionLocal() as session:
-        await upsert_api_key(session, tg_user_id, marketplace, text, settings.fernet_key)
-
-    # удаляем исходное сообщение с ключом для безопасности
+        await upsert_wb_api_key(session, tg_user_id, api_key, settings.fernet_key)
     try:
         await message.delete()
     except Exception:
         pass
-
+    await state.clear()
     await message.answer(
-        f"Ключ сохранён для {'<b>Wildberries</b>' if marketplace == 'wb' else '<b>Ozon</b>'} (зашифрован).",
+        "Ключ Wildberries сохранён и скрыт. Мониторинг будет работать автоматически.",
         reply_markup=main_menu(),
-        parse_mode="HTML",
+    )
+
+
+@router.message(OzonStates.waiting_client_id)
+async def process_ozon_client_id(message: Message, state: FSMContext) -> None:
+    client_id = (message.text or "").strip()
+    if not client_id:
+        await message.answer("Client ID не должен быть пустым. Попробуйте ещё раз.", reply_markup=main_menu())
+        return
+    await state.update_data(client_id=client_id)
+    await state.set_state(OzonStates.waiting_token)
+    await message.answer("Теперь отправьте токен Ozon одним сообщением.", reply_markup=main_menu())
+
+
+@router.message(OzonStates.waiting_token)
+async def process_ozon_token(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    client_id = data.get("client_id")
+    token = (message.text or "").strip()
+    if not token:
+        await message.answer("Токен не должен быть пустым. Попробуйте ещё раз.", reply_markup=main_menu())
+        return
+    tg_user_id = message.from_user.id if message.from_user else 0
+    async with SessionLocal() as session:
+        await upsert_ozon_credentials(session, tg_user_id, client_id, token, settings.fernet_key)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.clear()
+    await message.answer(
+        "Клиент и токен Ozon сохранены и скрыты. Мониторинг будет работать автоматически.",
+        reply_markup=main_menu(),
     )
