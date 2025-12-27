@@ -1,3 +1,7 @@
+# Версия файла: 2.0.0
+# Описание: docker-compose для mp_seller_bot (Postgres + Redis + Bot с встроенным Nginx в одном контейнере)
+# Дата изменения: 2025-12-27
+
 services:
   db:
     image: postgres:16-alpine
@@ -45,6 +49,8 @@ services:
     networks:
       - mp_seller_bot_net
     restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
 
 networks:
   mp_seller_bot_net:
