@@ -1,39 +1,41 @@
 """
-Файл: services/ozon_client.py
-Версия файла: 2.0.0
-Описание: Асинхронный клиент Ozon API для получения FBS/FBO posting'ов
+Версия файла: 1.2.0
+Описание: Реализация методов Ozon API (FBS/FBO postings) с ретраями и улучшенным логированием.
 Дата изменения: 2025-12-28
 
-Клиент OzonClient реализует безопасные и устойчивые запросы к API Ozon
-для получения новых отправлений (postings) по схемам FBS и FBO.
-
-Улучшения по сравнению с предыдущей версией:
-- Добавлены таймауты и контролируемые ретраи с экспоненциальной задержкой
-- Унифицирована внутренняя функция HTTP-запроса (_request_json)
-- Защита от невалидных ответов API (не dict / отсутствующие ключи)
-- Исключено логирование api_key и client_id
-- Добавлены ограничения на параметры (limit, offset)
-- Приведение результата строго к List[dict]
-- Подготовка к дальнейшему расширению (фильтры по дате, пагинация)
-
-Этот клиент используется воркером workers.notifier и должен быть
-полностью асинхронным и безопасным.
+Изменения:
+- добавлен единый метод _request_json() с повторными попытками и backoff
+- улучшено логирование ошибок: выводится HTTP статус, тело ответа, request-id/correlation-id (если есть)
+- добавлены безопасные таймауты и ограничения клиента httpx
+- добавлены параметры limit/offset и базовая валидация входных данных
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("services.ozon_client")
 
 
 class OzonClient:
-    BASE_URL = "https://api-seller.ozon.ru"
+    """
+    Асинхронный клиент для Ozon Seller API.
 
+    Используется для получения отправлений (postings):
+    - FBS: POST /v3/posting/fbs/list
+    - FBO: POST /v2/posting/fbo/list
+
+    Заголовки авторизации:
+    - Api-Key
+    - Client-Id
+    """
+
+    BASE_URL = "https://api-seller.ozon.ru"
     FBS_LIST_PATH = "/v3/posting/fbs/list"
     FBO_LIST_PATH = "/v2/posting/fbo/list"
 
@@ -41,149 +43,259 @@ class OzonClient:
         self,
         api_key: str,
         client_id: str,
-        *,
-        timeout: float = 30.0,
-        max_retries: int = 2,
-        retry_delay: float = 1.0,
-        limit: int = 50,
+        timeout_seconds: float = 30.0,
+        max_attempts: int = 3,
+        backoff_base_seconds: float = 1.0,
     ) -> None:
-        """
-        :param api_key: Api-Key Ozon
-        :param client_id: Client-Id Ozon
-        :param timeout: таймаут HTTP-запросов в секундах
-        :param max_retries: количество повторных попыток при ошибках
-        :param retry_delay: базовая задержка между ретраями
-        :param limit: количество posting'ов за запрос (1–100)
-        """
-        self.api_key = api_key
-        self.client_id = client_id
-        self.timeout = float(timeout)
-        self.max_retries = max(0, int(max_retries))
-        self.retry_delay = max(0.0, float(retry_delay))
-        self.limit = max(1, min(int(limit), 100))
+        self.api_key = (api_key or "").strip()
+        self.client_id = (client_id or "").strip()
 
-    def _headers(self) -> Dict[str, str]:
-        """
-        Заголовки для запросов к Ozon API.
-        """
+        if not self.api_key:
+            raise ValueError("OzonClient: api_key пустой")
+        if not self.client_id:
+            raise ValueError("OzonClient: client_id пустой")
+
+        if timeout_seconds <= 0:
+            raise ValueError("OzonClient: timeout_seconds должен быть > 0")
+        if max_attempts < 1:
+            raise ValueError("OzonClient: max_attempts должен быть >= 1")
+        if backoff_base_seconds <= 0:
+            raise ValueError("OzonClient: backoff_base_seconds должен быть > 0")
+
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_attempts = int(max_attempts)
+        self.backoff_base_seconds = float(backoff_base_seconds)
+
+    def _headers(self) -> dict[str, str]:
         return {
             "Api-Key": self.api_key,
             "Client-Id": self.client_id,
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "mp_seller_bot/ozon_client/1.2.0",
         }
 
-    async def _request_json(
-        self,
-        path: str,
-        payload: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    @staticmethod
+    def _extract_request_ids(response: httpx.Response) -> dict[str, str]:
         """
-        Выполняет POST-запрос к Ozon API с ретраями и возвращает JSON-ответ.
+        В Ozon иногда полезные идентификаторы лежат в заголовках.
+        Мы вытаскиваем наиболее часто встречающиеся.
+        """
+        keys = [
+            "x-request-id",
+            "x-correlation-id",
+            "x-trace-id",
+            "x-amzn-trace-id",
+            "request-id",
+            "correlation-id",
+        ]
+        out: dict[str, str] = {}
+        for k in keys:
+            v = response.headers.get(k)
+            if v:
+                out[k] = v
+        return out
 
-        :raises httpx.HTTPError: при сетевых ошибках или статусах 4xx/5xx
-        :raises ValueError: если ответ не является JSON-объектом
+    @staticmethod
+    def _safe_text(response: httpx.Response, limit: int = 2000) -> str:
+        try:
+            t = response.text
+        except Exception:
+            return "<no-response-text>"
+        t = t.strip()
+        if len(t) > limit:
+            return t[:limit] + "...(truncated)"
+        return t
+
+    @staticmethod
+    def _safe_json_or_text(response: httpx.Response) -> Any:
+        """
+        Пытаемся распарсить JSON. Если не JSON — возвращаем строку.
+        """
+        try:
+            return response.json()
+        except Exception:
+            return OzonClient._safe_text(response)
+
+    async def _request_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        Отправляет POST запрос в Ozon API и возвращает JSON как dict.
+
+        При 4xx/5xx поднимает httpx.HTTPStatusError, но предварительно
+        логирует детальную причину (включая тело ответа).
         """
         url = f"{self.BASE_URL}{path}"
-        last_exc: Optional[Exception] = None
 
-        for attempt in range(self.max_retries + 1):
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(
-                        url,
-                        json=payload,
-                        headers=self._headers(),
+                timeout = httpx.Timeout(self.timeout_seconds)
+                limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+                async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+                    response = await client.post(url, json=payload, headers=self._headers())
+
+                if response.status_code >= 400:
+                    ids = self._extract_request_ids(response)
+                    body_any = self._safe_json_or_text(response)
+
+                    logger.warning(
+                        "Ozon API HTTP %s for %s. attempt=%s/%s request_ids=%s response_body=%s",
+                        response.status_code,
+                        path,
+                        attempt,
+                        self.max_attempts,
+                        ids if ids else {},
+                        body_any,
                     )
-                response.raise_for_status()
+
+                    # Поднимаем стандартное исключение (с request/response внутри)
+                    response.raise_for_status()
 
                 data = response.json()
                 if not isinstance(data, dict):
-                    raise ValueError("Ozon API response is not a JSON object")
-
+                    raise ValueError(f"Ozon API вернул неожиданный тип JSON: {type(data)}")
                 return data
 
-            except (httpx.HTTPError, ValueError) as exc:
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-                if attempt >= self.max_retries:
-                    break
+                if attempt >= self.max_attempts:
+                    logger.error(
+                        "Ozon API network/timeout error for %s. attempts=%s/%s. last_error=%s",
+                        path,
+                        attempt,
+                        self.max_attempts,
+                        repr(exc),
+                    )
+                    raise
 
-                delay = self.retry_delay * (2 ** attempt)
+                delay = self.backoff_base_seconds * (2 ** (attempt - 1))
                 logger.warning(
-                    "Ozon API request failed (attempt %s/%s). Retrying in %.1fs. Error: %s",
-                    attempt + 1,
-                    self.max_retries + 1,
+                    "Ozon API network/timeout error (attempt %s/%s). Retrying in %.1fs. Error: %s",
+                    attempt,
+                    self.max_attempts,
                     delay,
-                    exc,
+                    repr(exc),
                 )
                 await asyncio.sleep(delay)
 
-        assert last_exc is not None
-        raise last_exc
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                # Для 4xx обычно ретраи не нужны, но бывают 429/5xx.
+                status = exc.response.status_code if exc.response is not None else None
 
-    def _base_payload(self) -> Dict[str, Any]:
+                # 429/5xx можно повторить, 400/401/403 обычно бессмысленно
+                retryable = False
+                if status is not None:
+                    if status == 429 or 500 <= status <= 599:
+                        retryable = True
+
+                if not retryable or attempt >= self.max_attempts:
+                    # Дадим максимально понятную ошибку наверх
+                    resp = exc.response
+                    ids = self._extract_request_ids(resp) if resp is not None else {}
+                    body = self._safe_text(resp) if resp is not None else "<no-response>"
+                    raise httpx.HTTPStatusError(
+                        message=(
+                            f"Ozon API error: HTTP {status} for {path}. "
+                            f"request_ids={ids}. body={body}"
+                        ),
+                        request=exc.request,
+                        response=exc.response,
+                    ) from exc
+
+                delay = self.backoff_base_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Ozon API HTTP error retryable (status=%s) attempt=%s/%s. Retrying in %.1fs.",
+                    status,
+                    attempt,
+                    self.max_attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+            except Exception as exc:
+                last_exc = exc
+                logger.exception("Unexpected error in OzonClient for %s: %s", path, repr(exc))
+                raise
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("OzonClient: неизвестная ошибка _request_json()")
+
+    @staticmethod
+    def _validate_limit_offset(limit: int, offset: int) -> tuple[int, int]:
+        if limit <= 0 or limit > 1000:
+            raise ValueError("limit должен быть в диапазоне 1..1000")
+        if offset < 0:
+            raise ValueError("offset должен быть >= 0")
+        return limit, offset
+
+    async def get_new_postings_fbs(
+        self,
+        status: str = "awaiting_packaging",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         """
-        Базовый payload для запросов posting list.
+        Получает список FBS posting'ов по статусу.
+        API Ozon: POST /v3/posting/fbs/list
+
+        Примечание:
+        - Если получаешь 400, теперь в логах будет тело ответа,
+          и станет ясно, что именно не понравилось Ozon (статус, фильтр, права, формат).
         """
-        return {
+        limit, offset = self._validate_limit_offset(limit, offset)
+
+        payload: dict[str, Any] = {
             "filter": {
-                "status": "awaiting_packaging",
+                "status": status,
             },
             "with": {
                 "analytics_data": False,
                 "financial_data": False,
             },
             "dir": "ASC",
-            "limit": self.limit,
-            "offset": 0,
+            "limit": limit,
+            "offset": offset,
         }
 
-    async def get_new_postings_fbs(self) -> List[Dict[str, Any]]:
-        """
-        Получает список новых FBS posting'ов со статусом awaiting_packaging.
-
-        API: POST /v3/posting/fbs/list
-
-        :return: список posting'ов (list[dict])
-        """
-        payload = self._base_payload()
         data = await self._request_json(self.FBS_LIST_PATH, payload)
+        result = data.get("result", {})
+        postings = result.get("postings", [])
 
-        postings = data.get("result", {}).get("postings", [])
-        if not isinstance(postings, list):
-            logger.debug("Ozon FBS response has no valid 'postings' list")
-            return []
+        if isinstance(postings, list):
+            return postings
+        return []
 
-        clean: List[Dict[str, Any]] = []
-        for item in postings:
-            if isinstance(item, dict):
-                clean.append(item)
-            else:
-                logger.debug("Ozon FBS posting item is not dict, skipped: %r", item)
-
-        return clean
-
-    async def get_new_postings_fbo(self) -> List[Dict[str, Any]]:
+    async def get_new_postings_fbo(
+        self,
+        status: str = "awaiting_packaging",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         """
-        Получает список новых FBO posting'ов со статусом awaiting_packaging.
-
-        API: POST /v2/posting/fbo/list
-
-        :return: список posting'ов (list[dict])
+        Получает список FBO posting'ов по статусу.
+        API Ozon: POST /v2/posting/fbo/list
         """
-        payload = self._base_payload()
+        limit, offset = self._validate_limit_offset(limit, offset)
+
+        payload: dict[str, Any] = {
+            "filter": {
+                "status": status,
+            },
+            "with": {
+                "analytics_data": False,
+                "financial_data": False,
+            },
+            "dir": "ASC",
+            "limit": limit,
+            "offset": offset,
+        }
+
         data = await self._request_json(self.FBO_LIST_PATH, payload)
+        result = data.get("result", {})
+        postings = result.get("postings", [])
 
-        postings = data.get("result", {}).get("postings", [])
-        if not isinstance(postings, list):
-            logger.debug("Ozon FBO response has no valid 'postings' list")
-            return []
-
-        clean: List[Dict[str, Any]] = []
-        for item in postings:
-            if isinstance(item, dict):
-                clean.append(item)
-            else:
-                logger.debug("Ozon FBO posting item is not dict, skipped: %r", item)
-
-        return clean
+        if isinstance(postings, list):
+            return postings
+        return []
